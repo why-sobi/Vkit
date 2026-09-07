@@ -1,0 +1,18 @@
+cmake_minimum_required(VERSION 3.20)
+project(dxgi_capture CXX)
+
+set(CMAKE_CXX_STANDARD 23)
+
+add_library(dxgi_capture STATIC
+    src/canvas.cpp
+)
+
+target_include_directories(dxgi_capture PUBLIC 
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+# Automatically link DirectX dependencies so consuming projects don't have to
+target_link_libraries(dxgi_capture PUBLIC 
+    d3d11 
+    dxgi
+)
