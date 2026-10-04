@@ -1,18 +1,22 @@
-cmake_minimum_required(VERSION 3.20)
-project(dxgi_capture CXX)
+cmake_minimum_required(VERSION 3.14)
 
-set(CMAKE_CXX_STANDARD 23)
+project(Vkit VERSION 1.0.0 LANGUAGES CXX)
 
-add_library(dxgi_capture STATIC
-    src/canvas.cpp
+# Global C++ standard settings
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+# Add submodules (e.g. canvas, audio, input, etc.)
+add_subdirectory(canvas)
+
+# Top-level executable combining all modules
+add_executable(Vkit
+    src/main.cpp
 )
 
-target_include_directories(dxgi_capture PUBLIC 
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-)
-
-# Automatically link DirectX dependencies so consuming projects don't have to
-target_link_libraries(dxgi_capture PUBLIC 
-    d3d11 
-    dxgi
+# Link internal submodules to the main application
+target_link_libraries(Vkit
+    PRIVATE
+        canvas
 )
