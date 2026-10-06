@@ -33,6 +33,7 @@ namespace vkit {
         return true;
     }
 
+#ifdef CANVAS_RAM_RESIDENCE
     void Canvas::copy_bgra_to_master_rgb(const uint8_t* src_pointer, UINT row_pitch, size_t monitor_idx) {
         const auto& meta = monitor_offsets[monitor_idx];
         const size_t master_stride = static_cast<size_t>(master_resolution.first) * 3; // 3 bytes/pixel (RGB)
@@ -40,12 +41,10 @@ namespace vkit {
         for (long y = 0; y < meta.height; ++y) {
             const uint8_t* srcRow = src_pointer + (y * row_pitch);
             
-            // Calculate destination offset inside master buffer
             uint8_t* dstRow = master_buffer.data() + 
                                 ((meta.y_offset + y) * master_stride) + 
                                 (meta.x_offset * 3);
 
-            // Strip Alpha & swap channels: BGRA -> RGB
             for (long x = 0; x < meta.width; ++x) {
                 dstRow[x * 3 + 0] = srcRow[x * 4 + 2]; // Red   (from BGRA idx 2)
                 dstRow[x * 3 + 1] = srcRow[x * 4 + 1]; // Green (from BGRA idx 1)
@@ -53,28 +52,95 @@ namespace vkit {
             }
         }
     }
+    void Canvas::saveMasterPpm(const char* filename) {
+        std::ofstream file(filename, std::ios::binary);
+        if (!file.is_open()) return;
+
+        int w = master_resolution.first;
+        int h = master_resolution.second;
+
+        file << "P6\n" << w << " " << h << "\n255\n";
+        file.write(reinterpret_cast<const char*>(master_buffer.data()), master_buffer.size());
+
+        std::cout << "[Saved Master Canvas PPM: " << filename << "]\n";
+    }
+
+    #ifdef CANVAS_DIRTY_RECT_OPT
+        void Canvas::copy_dirty_rects_to_master_rgb(const uint8_t* src_pointer, 
+                                                    UINT row_pitch, 
+                                                    size_t monitor_idx, 
+                                                    const std::vector<RECT>& dirty_rects) {
+            const auto& meta = monitor_offsets[monitor_idx];
+            const size_t master_stride = static_cast<size_t>(master_resolution.first) * 3;
+
+            for (const auto& rect : dirty_rects) {
+                long rect_w = rect.right - rect.left;
+                long rect_h = rect.bottom - rect.top;
+
+                for (long y = 0; y < rect_h; ++y) {
+                    long src_y = rect.top + y;
+                    long dst_y = meta.y_offset + src_y;
+
+                    const uint8_t* srcRow = src_pointer + (src_y * row_pitch) + (rect.left * 4);
+                    uint8_t* dstRow = master_buffer.data() + (dst_y * master_stride) + ((meta.x_offset + rect.left) * 3);
+
+                    for (long x = 0; x < rect_w; ++x) {
+                        dstRow[x * 3 + 0] = srcRow[x * 4 + 2]; // Red (from BGRA index 2)
+                        dstRow[x * 3 + 1] = srcRow[x * 4 + 1]; // Green (from BGRA index 1)
+                        dstRow[x * 3 + 2] = srcRow[x * 4 + 0]; // Blue (from BGRA index 0)
+                    }
+                }
+            }
+        }
+    #endif
+
+#else // CANVAS_VRAM_RESIDENCE
+    ComPtr<ID3D11Texture2D> Canvas::get_staging_texture(size_t monitor_idx) const { 
+        if (monitor_idx >= staging_textures.size()) return nullptr;
+        return staging_textures[monitor_idx]; 
+    }
+    ComPtr<ID3D11Texture2D> Canvas::get_staging_texture(GpuVendor vendor) const { 
+        for (size_t i = 0; i < staging_textures.size(); ++i) {
+            ComPtr<ID3D11Device> device;
+            staging_textures[i]->GetDevice(device.GetAddressOf());
+            if (!device) continue;
+
+            ComPtr<IDXGIDevice> dxgi_dev;
+            if (FAILED(device.As(&dxgi_dev))) continue;
+
+            ComPtr<IDXGIAdapter> adapter;
+            if (FAILED(dxgi_dev->GetAdapter(adapter.GetAddressOf()))) continue;
+
+            DXGI_ADAPTER_DESC desc;
+            adapter->GetDesc(&desc);
+            if (desc.VendorId == static_cast<UINT>(vendor)) {
+                return staging_textures[i];
+            }
+        }
+        return nullptr; 
+    }
+#endif // CANVAS_RAM_RESIDENCE
 
     bool Canvas::process_single_monitor(size_t monitor_idx) {
-        auto* dupl = desktop_duplications[monitor_idx].Get(); // .Get() returns the pointer to the object 
+        auto* dupl = desktop_duplications[monitor_idx].Get();
         if (!dupl) return false;
 
         ComPtr<IDXGIResource> desktop_resource;
 
-        // Non-blocking wait (0ms timeout) to prevent stalling other active monitors
-        HRESULT hr = dupl->AcquireNextFrame(0, &this->frame_info, desktop_resource.GetAddressOf()); // .GetAdderssOf() returns the address of the pointer to the object or aka its reference
+        // 1. Acquire frame from DXGI
+        HRESULT hr = dupl->AcquireNextFrame(0, &this->frame_info, desktop_resource.GetAddressOf());
 
-        if (hr == DXGI_ERROR_WAIT_TIMEOUT) { return false; } // Screen didn't change on this monitor
-        if (hr == DXGI_ERROR_ACCESS_LOST) { // Note: If DXGI_ERROR_ACCESS_LOST occurs (e.g. resolution change), a re-init is required.
-            std::cerr << "[Canvas] Access lost (app switch/mode change). Re-initialization required.\n";
-            // Mark for re-init on next tick
+        if (hr == DXGI_ERROR_WAIT_TIMEOUT) { return false; } 
+        if (hr == DXGI_ERROR_ACCESS_LOST) { 
+            std::cerr << "[Canvas] Access lost. Re-initialization required.\n";
             this->needs_reinit = true; 
             return false;
         }
-        if (FAILED(hr)) { return false; }  // any other failure (e.g. DXGI_ERROR_INVALID_CALL) is a hard failure and should be logged
+        if (FAILED(hr)) { return false; }  
 
-        // Query D3D11 Texture interface from raw resource
+        // 2. Extract GPU texture
         ComPtr<ID3D11Texture2D> gpu_texture;
-        hr = desktop_resource.As(&gpu_texture); // .As is the alternative for the QueryInteface for ComPtr Objects
+        hr = desktop_resource.As(&gpu_texture);
 
         if (FAILED(hr) || !gpu_texture) {
             dupl->ReleaseFrame();
@@ -84,30 +150,68 @@ namespace vkit {
         D3D11_TEXTURE2D_DESC gpu_desc;
         gpu_texture->GetDesc(&gpu_desc);
 
-        // Ensure we have a valid staging texture for this output
         if (!create_staging_texture_if_needed(monitor_idx, gpu_desc)) {
             dupl->ReleaseFrame();
             return false;
         }
 
-        // Copy VRAM GPU texture to VRAM CPU-Staging texture
+        // 3. Query Dirty Rectangles from DXGI
+    #ifdef CANVAS_DIRTY_RECT_OPT
+        std::vector<RECT> dirty_rects;
+        UINT dirty_rects_buffer_size = frame_info.TotalMetadataBufferSize;
+
+        if (dirty_rects_buffer_size > 0) {
+            UINT buf_size_needed = 0;
+            dirty_rects.resize(dirty_rects_buffer_size / sizeof(RECT));
+            
+            hr = dupl->GetFrameDirtyRects(
+                dirty_rects_buffer_size, 
+                dirty_rects.data(), 
+                &buf_size_needed
+            );
+
+            if (FAILED(hr)) {
+                dirty_rects.clear();
+            } else {
+                dirty_rects.resize(buf_size_needed / sizeof(RECT));
+            }
+        }
+    #endif
+
+        // 4. Copy VRAM Texture -> CPU-Staging Texture
         d3d11_context->CopyResource(staging_textures[monitor_idx].Get(), gpu_texture.Get());
 
-        // Map CPU Staging Texture to System RAM pointer
+    #ifdef CANVAS_RAM_RESIDENCE
+        // 5. Map Staging Texture & Copy to Master Buffer
         D3D11_MAPPED_SUBRESOURCE mapped_resource;
         hr = d3d11_context->Map(staging_textures[monitor_idx].Get(), 0, D3D11_MAP_READ, 0, &mapped_resource);
 
         if (SUCCEEDED(hr) && mapped_resource.pData) {
             const uint8_t* src_pointer = static_cast<const uint8_t*>(mapped_resource.pData);
 
-            // Perform direct BGRA -> RGB copy into master buffer
-            copy_bgra_to_master_rgb(src_pointer, mapped_resource.RowPitch, monitor_idx);
+        #ifdef CANVAS_DIRTY_RECT_OPT
+                // If it's the initial frame or dirty_rects is empty, do a full copy. Otherwise, copy only dirty rects.
+                if (!this->initial_frame_captured || dirty_rects.empty()) {
+                    copy_bgra_to_master_rgb(src_pointer, mapped_resource.RowPitch, monitor_idx);
+                } else {
+                    copy_dirty_rects_to_master_rgb(src_pointer, mapped_resource.RowPitch, monitor_idx, dirty_rects);
+                }
+        #else
+                // Standard full-frame copy
+                copy_bgra_to_master_rgb(src_pointer, mapped_resource.RowPitch, monitor_idx);
+        #endif
 
-            d3d11_context->Unmap(staging_textures[monitor_idx].Get(), 0);
-            dupl->ReleaseFrame();
-            this->initial_frame_captured = true;
-            return true;
-        }
+        d3d11_context->Unmap(staging_textures[monitor_idx].Get(), 0);
+        dupl->ReleaseFrame();
+        this->initial_frame_captured = true;
+        return true;
+    }
+    #else
+        // VRAM Residence Mode
+        dupl->ReleaseFrame();
+        this->initial_frame_captured = true;
+        return true;
+    #endif
 
         dupl->ReleaseFrame();
         return false;
@@ -118,21 +222,23 @@ namespace vkit {
     // =========================================================================
 
     void Canvas::cleanup() {
-        staging_textures.clear();
-        desktop_duplications.clear();
-        dxgi_outputs.clear();
+            staging_textures.clear();
+            desktop_duplications.clear();
+            dxgi_outputs.clear();
 
-        d3d11_context.Reset();
-        d3d11_device.Reset();
-        dxgi_adapter.Reset();
-        dxgi_factory.Reset();
+            d3d11_context.Reset();
+            d3d11_device.Reset();
+            dxgi_adapter.Reset();
+            dxgi_factory.Reset();
 
-        monitor_offsets.clear();
-        master_buffer.clear();
-        master_resolution = {0, 0};
-        initial_frame_captured = false;
-        needs_reinit = true;
-    }
+    #ifdef CANVAS_RAM_RESIDENCE
+            monitor_offsets.clear();
+            master_buffer.clear();
+    #endif
+            master_resolution = {0, 0};
+            initial_frame_captured = false;
+            needs_reinit = true;
+        }
 
     bool Canvas::init() {
         cleanup();
@@ -214,6 +320,7 @@ namespace vkit {
 
         master_resolution = { max_x - min_x, max_y - min_y };
 
+#ifdef CANVAS_RAM_RESIDENCE
         for (size_t i = 0; i < dxgi_outputs.size(); ++i) {
             DXGI_OUTPUT_DESC desc;
             dxgi_outputs[i]->GetDesc(&desc);
@@ -231,19 +338,21 @@ namespace vkit {
         // Allocate Master Buffer (RGB 24-bit)
         size_t master_bytes = static_cast<size_t>(master_resolution.first) * static_cast<size_t>(master_resolution.second) * 3;
         master_buffer.assign(master_bytes, 0);
+#endif
 
         for (int retry = 0; retry < 5; ++retry) {
             if (capture_frame()) {
                 std::cout << "[Canvas] Initial frame successfully captured on attempt " << (retry + 1) << "\n";
                 break;
             }
-            Sleep(20); // Give DXGI a moment to fill initial frame buffers
+            Sleep(20);
         }
 
         std::cout << "[Canvas] Initialized successfully. Master Canvas: "
-                << master_resolution.first << "x" << master_resolution.second << " (" << monitor_offsets.size() << " monitors)\n";
+                  << master_resolution.first << "x" << master_resolution.second << " (" << dxgi_outputs.size() << " monitors)\n";
 
         return true;
+    
     }
 
     bool Canvas::capture_frame() {
@@ -262,19 +371,6 @@ namespace vkit {
         }
 
         return updated_any;
-    }
-
-    void Canvas::saveMasterPpm(const char* filename) {
-        std::ofstream file(filename, std::ios::binary);
-        if (!file.is_open()) return;
-
-        int w = master_resolution.first;
-        int h = master_resolution.second;
-
-        file << "P6\n" << w << " " << h << "\n255\n";
-        file.write(reinterpret_cast<const char*>(master_buffer.data()), master_buffer.size());
-
-        std::cout << "[Saved Master Canvas PPM: " << filename << "]\n";
     }
 
 } // namespace vkit

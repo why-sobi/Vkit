@@ -1,3 +1,4 @@
+#define CANVAS_VRAM_RESIDENCE
 #include "canvas.hpp"
 
 int main() {
@@ -6,7 +7,5 @@ int main() {
 
     while (canvas.capture_frame());
 
-    canvas.saveMasterPpm("../../output.ppm"); // Save the captured frame to a PPM file for testing
-    
     return 0;
 }
