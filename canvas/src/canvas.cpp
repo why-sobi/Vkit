@@ -29,8 +29,8 @@ namespace {
 // PRIVATE HELPER FUNCTIONS
 // =========================================================================
 
-bool Canvas::create_staging_texture_if_needed(size_t monitor_idx, const D3D11_TEXTURE2D_DESC& gpu_desc) {
-    ComPtr<ID3D11Texture2D>& tex = staging_textures[monitor_idx];
+bool Canvas::create_frame_texture_if_needed(size_t monitor_idx, const D3D11_TEXTURE2D_DESC& gpu_desc) {
+    ComPtr<ID3D11Texture2D>& tex = frame_textures[monitor_idx];
 
     if (tex) {
         // Re-use only if the desktop texture still has the same geometry/format; otherwise
@@ -43,23 +43,27 @@ bool Canvas::create_staging_texture_if_needed(size_t monitor_idx, const D3D11_TE
         tex.Reset();
     }
 
-    D3D11_TEXTURE2D_DESC staging_desc = gpu_desc;
-    staging_desc.Usage = D3D11_USAGE_STAGING;
-    staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-#if defined(CANVAS_VRAM_RESIDENCE) && defined(CANVAS_MOUSE_DISPLAY)
-    staging_desc.CPUAccessFlags |= D3D11_CPU_ACCESS_WRITE; // the cursor is blended into the texture in place
-#endif
-    staging_desc.BindFlags = 0;
-    staging_desc.MiscFlags = 0;
-    staging_desc.MipLevels = 1;
-    staging_desc.ArraySize = 1;
-    staging_desc.SampleDesc.Count = 1;
-    staging_desc.SampleDesc.Quality = 0;
-
+    D3D11_TEXTURE2D_DESC desc = gpu_desc;
+    desc.BindFlags = 0;
+    desc.MiscFlags = 0;
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.SampleDesc.Count = 1;
+    desc.SampleDesc.Quality = 0;
+#ifdef CANVAS_RAM_RESIDENCE
     // staging texture is needed for the CPU to access (DXGI makes textures on GPU natively)
-    HRESULT hr = d3d11_device->CreateTexture2D(&staging_desc, nullptr, tex.GetAddressOf());
+    desc.Usage = D3D11_USAGE_STAGING;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+#else
+    // Stays in VRAM: a plain GPU texture that later passes (scaler, encoder interop) can sample.
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.CPUAccessFlags = 0;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+#endif
+
+    HRESULT hr = d3d11_device->CreateTexture2D(&desc, nullptr, tex.GetAddressOf());
     if (FAILED(hr)) {
-        std::cerr << "[Canvas] Failed to create staging texture for monitor " << monitor_idx << "\n";
+        std::cerr << "[Canvas] Failed to create frame texture for monitor " << monitor_idx << "\n";
         return false;
     }
     return true;
@@ -84,9 +88,11 @@ void Canvas::update_pointer_state(IDXGIOutputDuplication* dupl, size_t monitor_i
         if (FAILED(hr)) {
             p.shape.clear(); // don't render stale/garbage data
         }
+        ++p.shape_serial;
     }
 }
 
+#ifdef CANVAS_RAM_RESIDENCE
 void Canvas::blend_pointer(const PointerState& p, uint8_t* dst, size_t dst_pitch,
                            long dst_w, long dst_h, size_t bpp,
                            int ri, int gi, int bi) {
@@ -158,6 +164,7 @@ void Canvas::blend_pointer(const PointerState& p, uint8_t* dst, size_t dst_pitch
     }
 }
 
+#endif // CANVAS_RAM_RESIDENCE (blend_pointer)
 #endif // CANVAS_MOUSE_DISPLAY
 
 #ifdef CANVAS_RAM_RESIDENCE
@@ -218,45 +225,16 @@ void Canvas::draw_mouse_pointer_cpu(size_t monitor_idx) {
 
 #else // CANVAS_VRAM_RESIDENCE
 
-#ifdef CANVAS_MOUSE_DISPLAY
-void Canvas::draw_mouse_pointer_gpu(size_t monitor_idx) {
-    // The staging texture is CPU-visible memory, so the cursor is blended by mapping it read/write.
-    // (A true on-GPU composite would need a shader pass; see notes.)
-    ComPtr<ID3D11Texture2D>& tex = staging_textures[monitor_idx];
-    const PointerState& p = pointers[monitor_idx];
-    if (!tex || !p.visible || p.shape.empty()) return;
-
-    D3D11_TEXTURE2D_DESC desc{};
-    tex->GetDesc(&desc);
-
-    D3D11_MAPPED_SUBRESOURCE mapped{};
-    if (FAILED(d3d11_context->Map(tex.Get(), 0, D3D11_MAP_READ_WRITE, 0, &mapped)) || !mapped.pData) return;
-
-    blend_pointer(p, static_cast<uint8_t*>(mapped.pData), mapped.RowPitch,
-                  static_cast<long>(desc.Width), static_cast<long>(desc.Height),
-                  /*bytes_per_pixel*/ 4, /*r*/ 2, /*g*/ 1, /*b*/ 0); // BGRA
-
-    d3d11_context->Unmap(tex.Get(), 0);
-}
-#endif // CANVAS_MOUSE_DISPLAY
-
-ComPtr<ID3D11Texture2D> Canvas::get_staging_texture(size_t monitor_idx) const {
-    if (monitor_idx >= staging_textures.size()) return nullptr;
-    return staging_textures[monitor_idx];
+ComPtr<ID3D11Texture2D> Canvas::get_frame_texture(size_t monitor_idx) const {
+    if (monitor_idx >= frame_textures.size()) return nullptr;
+    return frame_textures[monitor_idx];
 }
 
-ComPtr<ID3D11Texture2D> Canvas::get_staging_texture(GpuVendor vendor) const {
-    // Every texture lives on the single d3d11_device, i.e. on adapter 0, so the vendor test is one check
-    // (the old per-texture loop dereferenced textures that may not exist yet).
-    if (!dxgi_adapter) return nullptr;
-
+UINT Canvas::get_adapter_vendor_id() const {
+    if (!dxgi_adapter) return 0;
     DXGI_ADAPTER_DESC1 desc{};
-    if (FAILED(dxgi_adapter->GetDesc1(&desc)) || desc.VendorId != static_cast<UINT>(vendor)) return nullptr;
-
-    for (const auto& tex : staging_textures) {
-        if (tex) return tex;
-    }
-    return nullptr;
+    if (FAILED(dxgi_adapter->GetDesc1(&desc))) return 0;
+    return desc.VendorId;
 }
 #endif // CANVAS_RAM_RESIDENCE
 
@@ -267,7 +245,7 @@ bool Canvas::process_single_monitor(size_t monitor_idx) {
     // 1. Acquire frame from DXGI
     DXGI_OUTDUPL_FRAME_INFO frame_info{};
     ComPtr<IDXGIResource> desktop_resource;
-    HRESULT hr = dupl->AcquireNextFrame(100, &frame_info, desktop_resource.GetAddressOf());
+    HRESULT hr = dupl->AcquireNextFrame(0, &frame_info, desktop_resource.GetAddressOf());
 
     if (hr == DXGI_ERROR_WAIT_TIMEOUT) { return false; }
     if (hr == DXGI_ERROR_ACCESS_LOST) {
@@ -293,10 +271,10 @@ bool Canvas::process_single_monitor(size_t monitor_idx) {
     D3D11_TEXTURE2D_DESC gpu_desc{};
     gpu_texture->GetDesc(&gpu_desc);
 
-    if (!create_staging_texture_if_needed(monitor_idx, gpu_desc)) {
+    if (!create_frame_texture_if_needed(monitor_idx, gpu_desc)) {
         return false;
     }
-    ID3D11Texture2D* staging = staging_textures[monitor_idx].Get();
+    ID3D11Texture2D* staging = frame_textures[monitor_idx].Get();
 
     // 3. Copy VRAM Texture -> CPU-Staging Texture
     d3d11_context->CopyResource(staging, gpu_texture.Get());
@@ -325,9 +303,8 @@ bool Canvas::process_single_monitor(size_t monitor_idx) {
     return true;
 
 #else // CANVAS_VRAM_RESIDENCE
-    #ifdef CANVAS_MOUSE_DISPLAY
-        draw_mouse_pointer_gpu(monitor_idx);
-    #endif
+    // Frame is already in frame_textures[monitor_idx]; the cursor is left to the downstream GPU pass
+    // (see get_pointer_state()).
     monitor_primed[monitor_idx] = 1;
     return true;
 #endif
@@ -338,10 +315,12 @@ bool Canvas::process_single_monitor(size_t monitor_idx) {
 // =========================================================================
 
 void Canvas::cleanup() {
-    staging_textures.clear();
+    ++generation_; // every handle previously handed out is about to become invalid
+    frame_textures.clear();
     desktop_duplications.clear();
     dxgi_outputs.clear();
     monitor_primed.clear();
+    monitor_offsets.clear();
 
     d3d11_context.Reset();
     d3d11_device.Reset();
@@ -352,7 +331,6 @@ void Canvas::cleanup() {
     pointers.clear();
 #endif
 #ifdef CANVAS_RAM_RESIDENCE
-    monitor_offsets.clear();
     master_buffer.clear();
 #endif
     master_resolution = {0, 0};
@@ -402,7 +380,7 @@ bool Canvas::init() {
         dxgi_adapter.Get(),
         D3D_DRIVER_TYPE_UNKNOWN,
         nullptr,
-        0,
+        D3D11_CREATE_DEVICE_BGRA_SUPPORT, // needed by Direct2D/video-processor interop on the same device
         nullptr,
         0,
         D3D11_SDK_VERSION,
@@ -425,7 +403,7 @@ bool Canvas::init() {
         desktop_duplications.push_back(dupl);
     }
 
-    staging_textures.resize(desktop_duplications.size());
+    frame_textures.resize(desktop_duplications.size());
     monitor_primed.assign(desktop_duplications.size(), 0);
 #ifdef CANVAS_MOUSE_DISPLAY
     pointers.assign(desktop_duplications.size(), PointerState{});
@@ -444,7 +422,6 @@ bool Canvas::init() {
 
     master_resolution = { max_x - min_x, max_y - min_y };
 
-#ifdef CANVAS_RAM_RESIDENCE
     for (size_t i = 0; i < output_descs.size(); ++i) {
         const RECT& rc = output_descs[i].DesktopCoordinates;
 
@@ -474,6 +451,7 @@ bool Canvas::init() {
         monitor_offsets.push_back(meta);
     }
 
+#ifdef CANVAS_RAM_RESIDENCE
     // Allocate Master Buffer (RGB 24-bit)
     size_t master_bytes = static_cast<size_t>(master_resolution.first) * static_cast<size_t>(master_resolution.second) * 3;
     master_buffer.assign(master_bytes, 0);

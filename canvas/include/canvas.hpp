@@ -15,9 +15,8 @@
 // every translation unit that includes this header. Set them with the build
 // system (e.g. target_compile_definitions(... PUBLIC ...)), not in some .cpp files only.
 // =========================================================================
-
 #if defined(CANVAS_RAM_RESIDENCE) && defined(CANVAS_VRAM_RESIDENCE)
-    #error "Define only one of CANVAS_RAM_RESIDENCE or CANVAS_VRAM_RESIDENCE."  
+    #error "Define only one of CANVAS_RAM_RESIDENCE or CANVAS_VRAM_RESIDENCE."
 #endif
 #if !defined(CANVAS_RAM_RESIDENCE) && !defined(CANVAS_VRAM_RESIDENCE)
     #define CANVAS_RAM_RESIDENCE            // default to RAM residence
@@ -40,13 +39,11 @@ using Microsoft::WRL::ComPtr;
 
 namespace vkit {
 
-#ifdef CANVAS_VRAM_RESIDENCE
     enum class GpuVendor : UINT {
         NVIDIA = 0x10DE,
         AMD    = 0x1002,
         INTEL  = 0x8086
     };
-#endif // CANVAS_VRAM_RESIDENCE
 
     // Offset and boundary metadata for each monitor in the Master Canvas
     struct MonitorOffset {
@@ -56,6 +53,19 @@ namespace vkit {
         long width = 0;         // Monitor Width (pixels)
         long height = 0;        // Monitor Height (pixels)
     };
+
+#ifdef CANVAS_MOUSE_DISPLAY
+    // Latest known cursor state for one monitor. DXGI only reports shape / position when they CHANGE,
+    // so Canvas remembers them. In VRAM mode the cursor is NOT composited by Canvas: a downstream GPU
+    // pass (e.g. your scaler) reads this and draws it. Re-upload the shape only when shape_serial changes.
+    struct PointerState {
+        std::vector<uint8_t> shape;                      // raw shape bits from GetFramePointerShape
+        DXGI_OUTDUPL_POINTER_SHAPE_INFO info{};          // Type / Width / Height / Pitch of `shape`
+        POINT position{0, 0};                            // top-left of the cursor image, relative to the monitor
+        bool visible = false;
+        uint64_t shape_serial = 0;                       // bumped every time `shape` / `info` change
+    };
+#endif
 
     // ## Image Capture Engine
     // 1. Queries for monitor information, captures the screen into dedicated buffer, and then returns a reference.
@@ -78,51 +88,44 @@ namespace vkit {
         // --- Per-Monitor DXGI State ---
         std::vector<ComPtr<IDXGIOutput1>> dxgi_outputs;                    // Screens (NOTE: adapters give output that are then converted into output1)
         std::vector<ComPtr<IDXGIOutputDuplication>> desktop_duplications;  // get monitor resolution buffer
-        std::vector<ComPtr<ID3D11Texture2D>> staging_textures;             // this is where we move screen image from VRAM to RAM
+        std::vector<ComPtr<ID3D11Texture2D>> frame_textures;               // RAM mode: CPU-readable staging copy. VRAM mode: GPU-only (DEFAULT, SHADER_RESOURCE) copy of the latest frame
         std::vector<uint8_t> monitor_primed;                               // 1 once a monitor has delivered a full frame since the last init()
 
         // --- Master Canvas Memory & Metadata ---
         std::pair<long, long> master_resolution{0, 0};  // just the size of the buffer in width x height format
 
+        std::vector<MonitorOffset> monitor_offsets;     // where each monitor sits on the virtual desktop / in the master buffer
+
         // --- Lifetime state ---
+        uint64_t generation_ = 0;                       // bumped whenever every D3D object is torn down (cleanup/init)
         bool needs_reinit = true;                       // true until init() succeeds; lets capture_frame() lazily (re)initialise
         ULONGLONG next_init_attempt_ms = 0;             // throttles automatic re-init attempts after a failure
 
         #ifdef CANVAS_RAM_RESIDENCE
             std::vector<uint8_t> master_buffer;             // Contiguous System RAM in RGB 24-bit format (for all monitors)
-            std::vector<MonitorOffset> monitor_offsets;     // tells where the offsets of monitor are (with other meta data) in the master buffer
 
             // Converts one BGRA rectangle (monitor-local coordinates) into the master RGB buffer. Clamps to the monitor.
             void copy_rect_to_master_rgb(const uint8_t* src_pointer, UINT row_pitch, size_t monitor_idx, RECT rect);
         #endif // CANVAS_RAM_RESIDENCE
 
         #ifdef CANVAS_MOUSE_DISPLAY
-            // DXGI only reports shape / position when they CHANGE, so we must remember them per monitor.
-            struct PointerState {
-                std::vector<uint8_t> shape;                      // raw shape bits from GetFramePointerShape
-                DXGI_OUTDUPL_POINTER_SHAPE_INFO info{};
-                POINT position{0, 0};                            // top-left of the cursor image, relative to the monitor
-                bool visible = false;
-            };
-            std::vector<PointerState> pointers;
+        std::vector<PointerState> pointers;
 
             void update_pointer_state(IDXGIOutputDuplication* dupl, size_t monitor_idx, const DXGI_OUTDUPL_FRAME_INFO& fi);
 
-            // Composites the cursor into a pixel surface of size dst_w x dst_h, clipped to that surface.
-            // The channel indices say where R/G/B live inside one destination pixel.
-            static void blend_pointer(const PointerState& p, uint8_t* dst, size_t dst_pitch,
-                                      long dst_w, long dst_h, size_t bytes_per_pixel,
-                                      int r_idx, int g_idx, int b_idx);
-
             #ifdef CANVAS_RAM_RESIDENCE
+                // Composites the cursor into a pixel surface of size dst_w x dst_h, clipped to that surface.
+                // The channel indices say where R/G/B live inside one destination pixel.
+                static void blend_pointer(const PointerState& p, uint8_t* dst, size_t dst_pitch,
+                                          long dst_w, long dst_h, size_t bytes_per_pixel,
+                                          int r_idx, int g_idx, int b_idx);
+
                 void draw_mouse_pointer_cpu(size_t monitor_idx);   // blends into master_buffer
-            #else
-                void draw_mouse_pointer_gpu(size_t monitor_idx);   // blends into the (CPU-visible) staging texture
             #endif
         #endif // CANVAS_MOUSE_DISPLAY
 
         // --- Private Helper Functions ---
-        bool create_staging_texture_if_needed(size_t monitor_idx, const D3D11_TEXTURE2D_DESC& gpu_desc); // we set up staging texture if havent already
+        bool create_frame_texture_if_needed(size_t monitor_idx, const D3D11_TEXTURE2D_DESC& gpu_desc);   // we set up the per-monitor frame texture if havent already
         bool process_single_monitor(size_t monitor_idx);                                                 // a helper to be called in a loop inside capture_all_monitors
         bool capture_all_monitors();                                                                     // one pass over every monitor, never re-initialises
 
@@ -140,17 +143,34 @@ namespace vkit {
 
         // --- Getters for nanobind / Python Interface ---
         std::pair<long, long> get_master_resolution() const { return master_resolution; }
+        const std::vector<MonitorOffset>& get_monitor_offsets() const { return monitor_offsets; }
+        size_t get_monitor_count() const { return desktop_duplications.size(); }
+
+        // Bumped every time init()/cleanup() rebuilds the world. If it differs from the value you saw last
+        // time, EVERY pointer/texture/device you fetched from this object is stale and must be re-fetched.
+        uint64_t generation() const { return generation_; }
+
+        #ifdef CANVAS_MOUSE_DISPLAY
+            const PointerState* get_pointer_state(size_t monitor_idx) const {
+                return monitor_idx < pointers.size() ? &pointers[monitor_idx] : nullptr;
+            }
+        #endif
 
         #ifdef CANVAS_RAM_RESIDENCE
             const uint8_t* get_master_buffer_ptr() const { return master_buffer.data(); }
             size_t get_master_buffer_size() const { return master_buffer.size(); }
-            const std::vector<MonitorOffset>& get_monitor_offsets() const { return monitor_offsets; }
 
             // Helper to save current Master Buffer to disk for testing (will be removed in the future)
             void saveMasterPpm(const char* filename) const;
         #else
-            ComPtr<ID3D11Texture2D> get_staging_texture(size_t monitor_idx) const;   // staging texture for a specific monitor index
-            ComPtr<ID3D11Texture2D> get_staging_texture(GpuVendor vendor) const;     // staging texture if the capture adapter is from this vendor (NVIDIA, AMD, INTEL)
+            // GPU-only BGRA copy of the latest frame of one monitor (nullptr until its first frame arrives).
+            // Canvas writes it with CopyResource on the immediate context, so a consumer that uses the SAME
+            // device/context (get_device()/get_context()) is automatically ordered after the copy.
+            ComPtr<ID3D11Texture2D> get_frame_texture(size_t monitor_idx) const;
+            ComPtr<ID3D11Device> get_device() const { return d3d11_device; }
+            ComPtr<ID3D11DeviceContext> get_context() const { return d3d11_context; }
+            // PCI vendor id of the capture adapter; compare with static_cast<UINT>(GpuVendor::NVIDIA) etc.
+            UINT get_adapter_vendor_id() const;
         #endif
     };
 }
