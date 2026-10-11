@@ -15,6 +15,8 @@ add_compile_definitions(
 # Add submodules (e.g. canvas, audio, input, etc.)
 add_subdirectory(canvas)
 add_subdirectory(scaler)
+add_subdirectory(encoder)
+
 
 # Top-level executable combining all modules
 add_executable(VKIT
@@ -26,4 +28,5 @@ target_link_libraries(VKIT
     PRIVATE
         canvas
         scaler
+        encoder
 )

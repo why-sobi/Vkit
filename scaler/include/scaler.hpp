@@ -20,8 +20,10 @@ namespace vkit {
         ColorFormat dst_format = ColorFormat::RGB24;
     };
 
-    // Forward declare the concrete implementation class so the alias knows it exists
-    class D3D11Scaler;
+    #if defined(_WIN32)
+        // Forward declare the concrete implementation class so the alias knows it exists
+        class D3D11Scaler;
+    #endif
 
 } // namespace vkit
 
