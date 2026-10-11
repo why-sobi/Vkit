@@ -7,8 +7,14 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+add_compile_definitions(
+    CANVAS_VRAM_RESIDENCE
+    CANVAS_MOUSE_DISPLAY
+)
+
 # Add submodules (e.g. canvas, audio, input, etc.)
 add_subdirectory(canvas)
+add_subdirectory(scaler)
 
 # Top-level executable combining all modules
 add_executable(VKIT
@@ -19,4 +25,5 @@ add_executable(VKIT
 target_link_libraries(VKIT
     PRIVATE
         canvas
+        scaler
 )

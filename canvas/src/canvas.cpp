@@ -93,6 +93,7 @@ void Canvas::update_pointer_state(IDXGIOutputDuplication* dupl, size_t monitor_i
 }
 
 #ifdef CANVAS_RAM_RESIDENCE
+
 void Canvas::blend_pointer(const PointerState& p, uint8_t* dst, size_t dst_pitch,
                            long dst_w, long dst_h, size_t bpp,
                            int ri, int gi, int bi) {
@@ -168,62 +169,64 @@ void Canvas::blend_pointer(const PointerState& p, uint8_t* dst, size_t dst_pitch
 #endif // CANVAS_MOUSE_DISPLAY
 
 #ifdef CANVAS_RAM_RESIDENCE
-void Canvas::copy_rect_to_master_rgb(const uint8_t* src_pointer, UINT row_pitch, size_t monitor_idx, RECT rect) {
-    const auto& meta = monitor_offsets[monitor_idx];
+    void Canvas::copy_rect_to_master_rgb(const uint8_t* src_pointer, UINT row_pitch, size_t monitor_idx, RECT rect) {
+        const auto& meta = monitor_offsets[monitor_idx];
 
-    // Clamp to the monitor so a bad rect can never read/write out of bounds.
-    rect.left   = (std::max)(rect.left, 0L);
-    rect.top    = (std::max)(rect.top, 0L);
-    rect.right  = (std::min)(rect.right, meta.width);
-    rect.bottom = (std::min)(rect.bottom, meta.height);
-    if (rect.right <= rect.left || rect.bottom <= rect.top) return;
+        // Clamp to the monitor so a bad rect can never read/write out of bounds.
+        rect.left   = (std::max)(rect.left, 0L);
+        rect.top    = (std::max)(rect.top, 0L);
+        rect.right  = (std::min)(rect.right, meta.width);
+        rect.bottom = (std::min)(rect.bottom, meta.height);
+        if (rect.right <= rect.left || rect.bottom <= rect.top) return;
 
-    const size_t master_stride = static_cast<size_t>(master_resolution.first) * 3; // 3 bytes/pixel (RGB)
-    const size_t rect_w = static_cast<size_t>(rect.right - rect.left);
+        const size_t master_stride = static_cast<size_t>(master_resolution.first) * 3; // 3 bytes/pixel (RGB)
+        const size_t rect_w = static_cast<size_t>(rect.right - rect.left);
 
-    for (long y = rect.top; y < rect.bottom; ++y) {
-        const uint8_t* srcRow = src_pointer + static_cast<size_t>(y) * row_pitch + static_cast<size_t>(rect.left) * 4;
-        uint8_t* dstRow = master_buffer.data()
-                        + static_cast<size_t>(meta.y_offset + y) * master_stride
-                        + static_cast<size_t>(meta.x_offset + rect.left) * 3;
+        for (long y = rect.top; y < rect.bottom; ++y) {
+            const uint8_t* srcRow = src_pointer + static_cast<size_t>(y) * row_pitch + static_cast<size_t>(rect.left) * 4;
+            uint8_t* dstRow = master_buffer.data()
+                            + static_cast<size_t>(meta.y_offset + y) * master_stride
+                            + static_cast<size_t>(meta.x_offset + rect.left) * 3;
 
-        for (size_t x = 0; x < rect_w; ++x) {
-            dstRow[x * 3 + 0] = srcRow[x * 4 + 2]; // Red   (from BGRA idx 2)
-            dstRow[x * 3 + 1] = srcRow[x * 4 + 1]; // Green (from BGRA idx 1)
-            dstRow[x * 3 + 2] = srcRow[x * 4 + 0]; // Blue  (from BGRA idx 0)
+            for (size_t x = 0; x < rect_w; ++x) {
+                dstRow[x * 3 + 0] = srcRow[x * 4 + 2]; // Red   (from BGRA idx 2)
+                dstRow[x * 3 + 1] = srcRow[x * 4 + 1]; // Green (from BGRA idx 1)
+                dstRow[x * 3 + 2] = srcRow[x * 4 + 0]; // Blue  (from BGRA idx 0)
+            }
         }
     }
-}
 
-void Canvas::saveMasterPpm(const char* filename) const {
-    std::ofstream file(filename, std::ios::binary);
-    if (!file.is_open()) {
-        std::cerr << "[Canvas] Could not open " << filename << " for writing\n";
-        return;
+    void Canvas::saveMasterPpm(const char* filename) const {
+        std::ofstream file(filename, std::ios::binary);
+        if (!file.is_open()) {
+            std::cerr << "[Canvas] Could not open " << filename << " for writing\n";
+            return;
+        }
+
+        file << "P6\n" << master_resolution.first << " " << master_resolution.second << "\n255\n";
+        file.write(reinterpret_cast<const char*>(master_buffer.data()), static_cast<std::streamsize>(master_buffer.size()));
+
+        std::cout << "[Saved Master Canvas PPM: " << filename << "]\n";
     }
 
-    file << "P6\n" << master_resolution.first << " " << master_resolution.second << "\n255\n";
-    file.write(reinterpret_cast<const char*>(master_buffer.data()), static_cast<std::streamsize>(master_buffer.size()));
-
-    std::cout << "[Saved Master Canvas PPM: " << filename << "]\n";
-}
-
 #ifdef CANVAS_MOUSE_DISPLAY
-void Canvas::draw_mouse_pointer_cpu(size_t monitor_idx) {
-    const auto& meta = monitor_offsets[monitor_idx];
-    const size_t master_stride = static_cast<size_t>(master_resolution.first) * 3;
+    void Canvas::draw_mouse_pointer_cpu(size_t monitor_idx) {
+        const auto& meta = monitor_offsets[monitor_idx];
+        const size_t master_stride = static_cast<size_t>(master_resolution.first) * 3;
 
-    uint8_t* monitor_origin = master_buffer.data()
-                            + static_cast<size_t>(meta.y_offset) * master_stride
-                            + static_cast<size_t>(meta.x_offset) * 3;
+        uint8_t* monitor_origin = master_buffer.data()
+                                + static_cast<size_t>(meta.y_offset) * master_stride
+                                + static_cast<size_t>(meta.x_offset) * 3;
 
-    // Clipped to THIS monitor (not the whole canvas) so the cursor can't bleed into a neighbour's region.
-    blend_pointer(pointers[monitor_idx], monitor_origin, master_stride, meta.width, meta.height,
-                  /*bytes_per_pixel*/ 3, /*r*/ 0, /*g*/ 1, /*b*/ 2);
-}
+        // Clipped to THIS monitor (not the whole canvas) so the cursor can't bleed into a neighbour's region.
+        blend_pointer(pointers[monitor_idx], monitor_origin, master_stride, meta.width, meta.height,
+                    /*bytes_per_pixel*/ 3, /*r*/ 0, /*g*/ 1, /*b*/ 2);
+    }
 #endif // CANVAS_MOUSE_DISPLAY
 
-#else // CANVAS_VRAM_RESIDENCE
+#endif // CANVAS_RAM_RESIDENCE
+
+#ifdef CANVAS_VRAM_RESIDENCE
 
 ComPtr<ID3D11Texture2D> Canvas::get_frame_texture(size_t monitor_idx) const {
     if (monitor_idx >= frame_textures.size()) return nullptr;
@@ -236,7 +239,7 @@ UINT Canvas::get_adapter_vendor_id() const {
     if (FAILED(dxgi_adapter->GetDesc1(&desc))) return 0;
     return desc.VendorId;
 }
-#endif // CANVAS_RAM_RESIDENCE
+#endif // CANVAS_VRAM_RESIDENCE
 
 bool Canvas::process_single_monitor(size_t monitor_idx) {
     IDXGIOutputDuplication* dupl = desktop_duplications[monitor_idx].Get();

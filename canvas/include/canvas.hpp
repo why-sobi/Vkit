@@ -6,7 +6,7 @@
 //
 //   Residence mode (pick at most one, default = RAM):
 //     CANVAS_RAM_RESIDENCE   frames are converted to RGB24 in one master buffer in system RAM
-//     CANVAS_VRAM_RESIDENCE  frames stay in per-monitor D3D11 textures (get_staging_texture())
+//     CANVAS_VRAM_RESIDENCE  frames stay in per-monitor D3D11 textures (get_frame_texture())
 //
 //   Options:
 //     CANVAS_NO_MOUSE_DISPLAY    (opt-out) do not composite the mouse cursor
@@ -15,15 +15,7 @@
 // every translation unit that includes this header. Set them with the build
 // system (e.g. target_compile_definitions(... PUBLIC ...)), not in some .cpp files only.
 // =========================================================================
-#if defined(CANVAS_RAM_RESIDENCE) && defined(CANVAS_VRAM_RESIDENCE)
-    #error "Define only one of CANVAS_RAM_RESIDENCE or CANVAS_VRAM_RESIDENCE."
-#endif
-#if !defined(CANVAS_RAM_RESIDENCE) && !defined(CANVAS_VRAM_RESIDENCE)
-    #define CANVAS_RAM_RESIDENCE            // default to RAM residence
-#endif
-#ifndef CANVAS_NO_MOUSE_DISPLAY
-    #define CANVAS_MOUSE_DISPLAY            // default to mouse display
-#endif
+
 
 #include <windows.h>
 #include <dxgi1_2.h>
@@ -166,6 +158,7 @@ namespace vkit {
             // GPU-only BGRA copy of the latest frame of one monitor (nullptr until its first frame arrives).
             // Canvas writes it with CopyResource on the immediate context, so a consumer that uses the SAME
             // device/context (get_device()/get_context()) is automatically ordered after the copy.
+            
             ComPtr<ID3D11Texture2D> get_frame_texture(size_t monitor_idx) const;
             ComPtr<ID3D11Device> get_device() const { return d3d11_device; }
             ComPtr<ID3D11DeviceContext> get_context() const { return d3d11_context; }
