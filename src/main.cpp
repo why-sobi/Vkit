@@ -2,6 +2,7 @@
 
 #include "canvas.hpp"
 #include "encoder.hpp"
+#include "scaler.hpp"
 
 #include <fstream>
 #include <iostream>
@@ -9,6 +10,7 @@
 
 int main() {
     vkit::Canvas canvas;
+    vkit::Scaler scaler;
     vkit::JpegEncoder encoder;
 
     if (!canvas.init()) {
@@ -16,7 +18,7 @@ int main() {
         return 1;
     }
 
-    // Encode monitor 0 directly from its D3D11 texture.
+    // Scale and encode monitor 0 using GPU textures throughout.
     const auto& monitor_offsets = canvas.get_monitor_offsets();
     if (monitor_offsets.empty()) {
         std::cerr << "[Test] No monitors available.\n";
@@ -25,14 +27,30 @@ int main() {
 
     const uint32_t width = static_cast<uint32_t>(monitor_offsets[0].width);
     const uint32_t height = static_cast<uint32_t>(monitor_offsets[0].height);
-    if (!encoder.init(canvas.get_device().Get(), {width, height, 85})) {
+    constexpr uint32_t output_width = 800;
+    constexpr uint32_t output_height = 480;
+    vkit::ScalerDesc scale_desc{
+        width, height, output_width, output_height,
+        vkit::ColorFormat::BGRA32
+    };
+
+    if (!scaler.init(canvas.get_device().Get(), scale_desc) ||
+        !encoder.init(canvas.get_device().Get(),
+                      {output_width, output_height, 85})) {
         std::cerr << "[Test] GPU pipeline initialization failed.\n";
         return 1;
     }
 
     if (canvas.capture_frame()) {
+        if (!scaler.scale_frame(
+                canvas.get_context().Get(),
+                canvas.get_frame_texture(0).Get())) {
+            std::cerr << "[Test] Scaling failed.\n";
+            return 1;
+        }
+
         std::vector<uint8_t> jpeg;
-        if (!encoder.encode_texture(canvas.get_frame_texture(0).Get(), jpeg)) {
+        if (!encoder.encode_texture(scaler.get_scaled_texture().Get(), jpeg)) {
             std::cerr << "[Test] GPU JPEG encoding failed.\n";
             return 1;
         }

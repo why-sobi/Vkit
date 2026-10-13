@@ -58,7 +58,9 @@ bool Canvas::create_frame_texture_if_needed(size_t monitor_idx, const D3D11_TEXT
     // Stays in VRAM: a plain GPU texture that later passes (scaler, encoder interop) can sample.
     desc.Usage = D3D11_USAGE_DEFAULT;
     desc.CPUAccessFlags = 0;
-    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    // The video processor accepts input textures with a render-target bind
+    // flag. Keep shader-resource access for other GPU consumers as well.
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
 #endif
 
     HRESULT hr = d3d11_device->CreateTexture2D(&desc, nullptr, tex.GetAddressOf());
