@@ -17,3 +17,19 @@ target_link_libraries(encoder PUBLIC
     d3d11 
     dxgi
 )
+
+find_package(CUDAToolkit QUIET)
+if (CUDAToolkit_FOUND AND TARGET CUDA::nvjpeg)
+    target_compile_definitions(encoder PRIVATE VKIT_HAS_NVJPEG)
+    target_link_libraries(encoder PUBLIC CUDA::cudart CUDA::nvjpeg)
+
+    add_executable(jpeg_encoder_test
+        tests/jpeg_encoder_test.cpp
+    )
+    target_link_libraries(jpeg_encoder_test PRIVATE encoder)
+    if (WIN32)
+        target_link_libraries(jpeg_encoder_test PRIVATE shell32)
+    endif()
+else()
+    message(WARNING "CUDA Toolkit/nvJPEG not found: nvJPEG is disabled for this build.")
+endif()
