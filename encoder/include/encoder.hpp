@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 struct ID3D11Device;
@@ -22,7 +23,7 @@ struct JpegEncoderDesc {
 // a normal socket to the ESP32.
 class JpegEncoder {
 public:
-    JpegEncoder() = default;
+    JpegEncoder();
     ~JpegEncoder();
 
     JpegEncoder(const JpegEncoder&) = delete;
@@ -41,8 +42,8 @@ public:
         std::vector<uint8_t>& jpeg_output
     );
 
-    // Maps the D3D11 texture into CUDA, converts BGRA to RGB on the GPU, and
-    // sends the RGB device buffer to nvJPEG.
+    // Encodes a D3D11 BGRA texture on the GPU without reading the full image
+    // back to the CPU. Requires the D3D11 init() overload.
     bool encode_texture(
         ID3D11Texture2D* texture,
         std::vector<uint8_t>& jpeg_output
@@ -51,14 +52,13 @@ public:
     void cleanup();
 
 private:
+    // Vendor backends. Each one is defined entirely in encoder.cpp inside its
+    // own #ifdef section, so the vendor SDK headers never leak into this file.
+    // Add new backends (e.g. AMD) next to this one.
+    struct NvjpegBackend;
+
     JpegEncoderDesc desc_{};
-    void* handle_ = nullptr;           // nvJPEG library context
-    void* encode_state_ = nullptr;     // reusable per-encoder JPEG state
-    void* encode_params_ = nullptr;    // quality and sampling settings
-    void* stream_ = nullptr;           // CUDA command stream
-    void* device_rgb_ = nullptr;       // GPU-side interleaved RGB buffer
-    void* graphics_resource_ = nullptr;// registered D3D11 texture
-    bool texture_mode_ = false;
+    std::unique_ptr<NvjpegBackend> nvjpeg_;
 };
 
 }
