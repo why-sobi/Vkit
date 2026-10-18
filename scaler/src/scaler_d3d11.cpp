@@ -5,9 +5,30 @@
 
 namespace vkit {
 
+    DXGI_FORMAT D3D11Scaler::to_dxgi_format(ColorFormat format) {
+        switch (format) {
+            case ColorFormat::BGRA32: return DXGI_FORMAT_B8G8R8A8_UNORM;
+            case ColorFormat::NV12:   return DXGI_FORMAT_NV12;
+            default:                  return DXGI_FORMAT_UNKNOWN; // RGB24 / RGB565 have no video processor output
+        }
+    }
+
     bool D3D11Scaler::init(ID3D11Device* device, const ScalerDesc& desc) {
         if (!device) return false;
         config_ = desc;
+
+        // Drop everything tied to a previous device (re-init after a capture reset)
+        video_context_.Reset();
+        video_processor_.Reset();
+        video_enum_.Reset();
+        output_view_.Reset();
+        scaled_texture_.Reset();
+
+        output_format_ = to_dxgi_format(config_.dst_format);
+        if (output_format_ == DXGI_FORMAT_UNKNOWN) {
+            std::cerr << "[D3D11Scaler] Unsupported output format (use BGRA32 or NV12).\n";
+            return false;
+        }
 
         HRESULT hr = device->QueryInterface(IID_PPV_ARGS(&video_device_));
         if (FAILED(hr)) {
@@ -29,6 +50,13 @@ namespace vkit {
             return false;
         }
 
+        UINT support = 0;
+        if (FAILED(video_enum_->CheckVideoProcessorFormat(output_format_, &support)) ||
+            !(support & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT)) {
+            std::cerr << "[D3D11Scaler] The video processor cannot output the requested format.\n";
+            return false;
+        }
+
         hr = video_device_->CreateVideoProcessor(video_enum_.Get(), 0, video_processor_.GetAddressOf());
         if (FAILED(hr)) {
             std::cerr << "[D3D11Scaler] Failed to create Video Processor.\n";
@@ -45,7 +73,7 @@ namespace vkit {
         tex_desc.Height = config_.dst_height;
         tex_desc.MipLevels = 1;
         tex_desc.ArraySize = 1;
-        tex_desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        tex_desc.Format = output_format_;
         tex_desc.SampleDesc.Count = 1;
         tex_desc.Usage = D3D11_USAGE_DEFAULT;
         tex_desc.BindFlags = D3D11_BIND_RENDER_TARGET;
@@ -74,6 +102,18 @@ namespace vkit {
         if (!video_context_) {
             HRESULT hr = context->QueryInterface(IID_PPV_ARGS(&video_context_));
             if (FAILED(hr)) return false;
+
+            // Desktop frames are full-range RGB. YUV output is full-range BT.601,
+            // the JFIF convention, so JPEG decoders show the right colors and levels.
+            D3D11_VIDEO_PROCESSOR_COLOR_SPACE in_space{};
+            in_space.RGB_Range = 0; // 0-255
+            video_context_->VideoProcessorSetStreamColorSpace(video_processor_.Get(), 0, &in_space);
+
+            D3D11_VIDEO_PROCESSOR_COLOR_SPACE out_space{};
+            out_space.RGB_Range = 0;
+            out_space.YCbCr_Matrix = 0; // BT.601
+            out_space.Nominal_Range = D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_0_255;
+            video_context_->VideoProcessorSetOutputColorSpace(video_processor_.Get(), &out_space);
         }
 
         D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC in_view_desc{};

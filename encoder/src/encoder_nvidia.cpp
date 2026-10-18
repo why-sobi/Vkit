@@ -53,6 +53,10 @@ namespace vkit {
             std::cerr << "[NvidiaJpegEncoder] Width, height, and quality must be valid.\n";
             return false;
         }
+        if (desc.input_format != JpegInputFormat::BGRA32) {
+            std::cerr << "[NvidiaJpegEncoder] Only BGRA32 input is supported.\n";
+            return false;
+        }
 
         desc_ = desc;
         texture_mode_ = d3d_device != nullptr;

@@ -5,18 +5,26 @@
 
 namespace vkit {
 
+    // Pixel layout of the frames handed to the encoder. NV12 is already 4:2:0,
+    // so the JPEG gets subsampled chroma (much smaller); BGRA32 encodes 4:4:4.
+    enum class JpegInputFormat {
+        BGRA32,
+        NV12      // Intel backend only; width and height must be even
+    };
+
     struct JpegEncoderDesc {
         uint32_t width = 0;
         uint32_t height = 0;
         int quality = 75;
+        JpegInputFormat input_format = JpegInputFormat::BGRA32;
     };
 
     // Every backend exposes the same interface:
     //
     //   bool init(const JpegEncoderDesc& desc);                       // CPU input
     //   bool init(ID3D11Device* d3d_device, const JpegEncoderDesc&);  // GPU input
-    //   std::span<const uint8_t> encode_bgra(const uint8_t* pixels, size_t row_pitch);
-    //   std::span<const uint8_t> encode_texture(ID3D11Texture2D* texture);
+    //   std::span<const uint8_t> encode_bgra(const uint8_t* pixels, size_t row_pitch);  // BGRA32 input only
+    //   std::span<const uint8_t> encode_texture(ID3D11Texture2D* texture);               // texture format must match input_format
     //   void cleanup();
     //   JpegEncoderDesc get_desc() const;
     //   bool uses_video_memory() const;   // true when frames stay on the GPU

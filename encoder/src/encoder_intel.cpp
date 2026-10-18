@@ -84,6 +84,10 @@ namespace vkit {
             std::cerr << "[IntelJpegEncoder] Width, height, and quality must be valid.\n";
             return false;
         }
+        if (desc.input_format == JpegInputFormat::NV12 && ((desc.width | desc.height) & 1u)) {
+            std::cerr << "[IntelJpegEncoder] NV12 input needs an even width and height.\n";
+            return false;
+        }
 
         desc_ = desc;
 
@@ -159,15 +163,17 @@ namespace vkit {
             }
         }
 
-        // JPEG encode from BGRA input. RGB4 input requires 4:4:4 output.
+        // JPEG encode from BGRA (RGB4) or NV12 input. RGB4 input requires 4:4:4
+        // output; NV12 is already 4:2:0, which roughly halves the JPEG size.
         // Frame dimensions must be 16-aligned; the crop is the real image size.
+        const bool nv12 = desc_.input_format == JpegInputFormat::NV12;
         mfxVideoParam params{};
         params.mfx.CodecId = MFX_CODEC_JPEG;
         params.mfx.Quality = static_cast<mfxU16>(desc_.quality);
         params.mfx.Interleaved = MFX_SCANTYPE_INTERLEAVED;
         params.mfx.RestartInterval = 0;
-        params.mfx.FrameInfo.FourCC = MFX_FOURCC_RGB4;
-        params.mfx.FrameInfo.ChromaFormat = MFX_CHROMAFORMAT_YUV444;
+        params.mfx.FrameInfo.FourCC = nv12 ? MFX_FOURCC_NV12 : MFX_FOURCC_RGB4;
+        params.mfx.FrameInfo.ChromaFormat = nv12 ? MFX_CHROMAFORMAT_YUV420 : MFX_CHROMAFORMAT_YUV444;
         params.mfx.FrameInfo.PicStruct = MFX_PICSTRUCT_PROGRESSIVE;
         params.mfx.FrameInfo.FrameRateExtN = 30;
         params.mfx.FrameInfo.FrameRateExtD = 1;
@@ -186,13 +192,22 @@ namespace vkit {
         surface_ = {};
         surface_.Info = params.mfx.FrameInfo;
 
-        const uint32_t frame_bytes =
-            static_cast<uint32_t>(params.mfx.FrameInfo.Width) * params.mfx.FrameInfo.Height * 4u;
+        const uint32_t frame_pixels =
+            static_cast<uint32_t>(params.mfx.FrameInfo.Width) * params.mfx.FrameInfo.Height;
+        const uint32_t frame_bytes = frame_pixels * 4u; // BGRA size, also the output buffer bound
 
         if (video_memory) {
             // surface_.Data.MemId is pointed at input_frame_ or external_frame_
             // per frame, in encode_surface()'s callers.
             if (!create_input_texture()) return false;
+        } else if (nv12) {
+            // System-memory NV12 surface: a full-res Y plane followed by a
+            // half-res interleaved UV plane, both with the same pitch.
+            surface_data_.assign(frame_pixels * 3u / 2u, 0);
+            surface_.Data.Y = surface_data_.data();
+            surface_.Data.UV = surface_.Data.Y + frame_pixels;
+            surface_.Data.V = surface_.Data.UV + 1;
+            set_pitch(surface_.Data, params.mfx.FrameInfo.Width);
         } else {
             // System-memory input surface, reused for every frame. RGB4 is stored
             // as packed B, G, R, A bytes, so the channel pointers are offsets into it.
@@ -247,7 +262,7 @@ namespace vkit {
         desc.Height = surface_.Info.Height;
         desc.MipLevels = 1;
         desc.ArraySize = 1;
-        desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        desc.Format = input_dxgi_format();
         desc.SampleDesc.Count = 1;
         desc.Usage = D3D11_USAGE_DEFAULT;
         desc.BindFlags = D3D11_BIND_RENDER_TARGET;
@@ -265,6 +280,10 @@ namespace vkit {
     std::span<const uint8_t> IntelJpegEncoder::encode_bgra(const uint8_t* pixels, size_t row_pitch) {
         if (!initialized_) {
             std::cerr << "[IntelJpegEncoder] Encoder is not initialized.\n";
+            return {};
+        }
+        if (desc_.input_format != JpegInputFormat::BGRA32) {
+            std::cerr << "[IntelJpegEncoder] encode_bgra() needs an encoder initialised for BGRA32 input.\n";
             return {};
         }
         if (!pixels || row_pitch < static_cast<size_t>(desc_.width) * 4) {
@@ -299,12 +318,17 @@ namespace vkit {
             return {};
         }
 
+        const bool nv12 = desc_.input_format == JpegInputFormat::NV12;
+
         D3D11_TEXTURE2D_DESC src_desc{};
         texture->GetDesc(&src_desc);
-        if (src_desc.Width < desc_.width || src_desc.Height < desc_.height ||
-            (src_desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM &&
-             src_desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM_SRGB)) {
-            std::cerr << "[IntelJpegEncoder] Texture must be B8G8R8A8 and at least the encoder size.\n";
+        const bool format_ok = nv12
+            ? src_desc.Format == DXGI_FORMAT_NV12
+            : (src_desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM ||
+               src_desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB);
+        if (src_desc.Width < desc_.width || src_desc.Height < desc_.height || !format_ok) {
+            std::cerr << "[IntelJpegEncoder] Texture must be " << (nv12 ? "NV12" : "B8G8R8A8")
+                      << " and at least the encoder size.\n";
             return {};
         }
 
@@ -315,7 +339,7 @@ namespace vkit {
             const bool direct =
                 src_desc.Width == surface_.Info.Width &&
                 src_desc.Height == surface_.Info.Height &&
-                src_desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM &&
+                src_desc.Format == input_dxgi_format() &&
                 src_desc.ArraySize == 1 &&
                 src_desc.SampleDesc.Count == 1 &&
                 src_desc.Usage == D3D11_USAGE_DEFAULT &&
@@ -352,10 +376,33 @@ namespace vkit {
         }
 
         // The JPEG lands in bitstream_data_, so the view outlives the Unmap.
-        const auto jpeg = encode_bgra(static_cast<const uint8_t*>(mapped.pData), mapped.RowPitch);
+        const auto* base = static_cast<const uint8_t*>(mapped.pData);
+        const auto jpeg = nv12
+            ? encode_nv12_planes(base, base + static_cast<size_t>(mapped.RowPitch) * src_desc.Height, mapped.RowPitch)
+            : encode_bgra(base, mapped.RowPitch);
 
         d3d_context_->Unmap(staging_texture_.Get(), 0);
         return jpeg;
+    }
+
+    // System-memory NV12 path: copies the Y plane and the interleaved UV plane
+    // (half height) into surface_, then encodes.
+    std::span<const uint8_t> IntelJpegEncoder::encode_nv12_planes(const uint8_t* y, const uint8_t* uv, size_t pitch) {
+        const size_t surface_pitch = surface_.Info.Width;
+        uint8_t* dst_uv = surface_data_.data() + surface_pitch * surface_.Info.Height;
+
+        for (uint32_t row = 0; row < desc_.height; ++row) {
+            std::memcpy(surface_data_.data() + row * surface_pitch, y + row * pitch, desc_.width);
+        }
+        for (uint32_t row = 0; row < desc_.height / 2; ++row) {
+            std::memcpy(dst_uv + row * surface_pitch, uv + row * pitch, desc_.width);
+        }
+
+        return encode_surface();
+    }
+
+    DXGI_FORMAT IntelJpegEncoder::input_dxgi_format() const {
+        return desc_.input_format == JpegInputFormat::NV12 ? DXGI_FORMAT_NV12 : DXGI_FORMAT_B8G8R8A8_UNORM;
     }
 
     bool IntelJpegEncoder::create_staging_texture(const D3D11_TEXTURE2D_DESC& src_desc) {

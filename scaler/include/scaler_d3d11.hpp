@@ -12,6 +12,7 @@ namespace vkit {
     class D3D11Scaler {
     private:
         ScalerDesc config_{};
+        DXGI_FORMAT output_format_ = DXGI_FORMAT_UNKNOWN; // texture format of scaled_texture_
 
         ComPtr<ID3D11VideoDevice> video_device_;
         ComPtr<ID3D11VideoContext> video_context_;
@@ -22,6 +23,7 @@ namespace vkit {
         ComPtr<ID3D11VideoProcessorOutputView> output_view_;
 
         bool create_output_resources(ID3D11Device* device);
+        static DXGI_FORMAT to_dxgi_format(ColorFormat format); // UNKNOWN for formats the video processor cannot output
 
     public:
         D3D11Scaler() = default;

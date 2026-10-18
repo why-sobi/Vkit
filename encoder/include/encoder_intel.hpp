@@ -66,6 +66,8 @@ namespace vkit {
         bool create_input_texture();
         bool create_staging_texture(const D3D11_TEXTURE2D_DESC& src_desc);
         std::span<const uint8_t> encode_surface();
+        std::span<const uint8_t> encode_nv12_planes(const uint8_t* y, const uint8_t* uv, size_t pitch);
+        DXGI_FORMAT input_dxgi_format() const; // texture format matching desc_.input_format
 
         mfxStatus alloc_frames(const mfxFrameAllocRequest& request, mfxFrameAllocResponse& response);
         mfxStatus free_frames(mfxFrameAllocResponse& response);
@@ -96,7 +98,8 @@ namespace vkit {
         // until the next encode/init/cleanup call. Empty on failure.
         std::span<const uint8_t> encode_bgra(const uint8_t* pixels, size_t row_pitch);
 
-        // Requires the D3D11 init() overload. The texture must be B8G8R8A8.
+        // Requires the D3D11 init() overload. The texture must be B8G8R8A8, or
+        // NV12 when the encoder was initialised with JpegInputFormat::NV12.
         std::span<const uint8_t> encode_texture(ID3D11Texture2D* texture);
 
         void cleanup();

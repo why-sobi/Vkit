@@ -17,7 +17,7 @@ namespace vkit {
         uint32_t src_height = 0;
         uint32_t dst_width = 0;
         uint32_t dst_height = 0;
-        ColorFormat dst_format = ColorFormat::RGB24;
+        ColorFormat dst_format = ColorFormat::BGRA32; // D3D11 backend outputs BGRA32 or NV12
     };
 
     #if defined(_WIN32)
