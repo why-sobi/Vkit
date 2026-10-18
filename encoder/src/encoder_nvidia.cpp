@@ -101,19 +101,14 @@ namespace vkit {
         return true;
     }
 
-    bool NvidiaJpegEncoder::encode_bgra(
-        const uint8_t* pixels,
-        size_t row_pitch,
-        std::vector<uint8_t>& jpeg_output) {
-        jpeg_output.clear();
-
+    std::span<const uint8_t> NvidiaJpegEncoder::encode_bgra(const uint8_t* pixels, size_t row_pitch) {
         if (!initialized_) {
             std::cerr << "[NvidiaJpegEncoder] Encoder is not initialized.\n";
-            return false;
+            return {};
         }
         if (!pixels || row_pitch < static_cast<size_t>(desc_.width) * 4) {
             std::cerr << "[NvidiaJpegEncoder] Invalid BGRA input.\n";
-            return false;
+            return {};
         }
 
         // Convert BGRA to packed RGB on the CPU, then upload it for nvJPEG.
@@ -132,20 +127,16 @@ namespace vkit {
         if (!check(cudaMemcpyAsync(device_rgb_, host_rgb_.data(), host_rgb_.size(),
                                    cudaMemcpyHostToDevice, stream_),
                    "cudaMemcpyAsync")) {
-            return false;
+            return {};
         }
 
-        return encode_device_rgb(jpeg_output);
+        return encode_device_rgb();
     }
 
-    bool NvidiaJpegEncoder::encode_texture(
-        ID3D11Texture2D* texture,
-        std::vector<uint8_t>& jpeg_output) {
-        jpeg_output.clear();
-
+    std::span<const uint8_t> NvidiaJpegEncoder::encode_texture(ID3D11Texture2D* texture) {
         if (!initialized_ || !texture_mode_ || !texture) {
             std::cerr << "[NvidiaJpegEncoder] Texture encoding is not initialized.\n";
-            return false;
+            return {};
         }
 
         // Registration connects this D3D11 resource to CUDA. It does not copy
@@ -163,14 +154,14 @@ namespace vkit {
                            &graphics_resource_, texture, cudaGraphicsRegisterFlagsNone),
                        "cudaGraphicsD3D11RegisterResource")) {
                 graphics_resource_ = nullptr;
-                return false;
+                return {};
             }
             registered_texture_ = texture;
         }
 
         if (!check(cudaGraphicsMapResources(1, &graphics_resource_, stream_),
                    "cudaGraphicsMapResources")) {
-            return false;
+            return {};
         }
 
         // A mapped D3D11 texture is exposed as a CUDA array. The CUDA kernel reads
@@ -190,16 +181,16 @@ namespace vkit {
         const cudaError_t unmap_status =
             cudaGraphicsUnmapResources(1, &graphics_resource_, stream_);
         if (!success || !check(unmap_status, "cudaGraphicsUnmapResources")) {
-            return false;
+            return {};
         }
 
-        return encode_device_rgb(jpeg_output);
+        return encode_device_rgb();
     }
 
     // Compresses device_rgb_ on the GPU. Only the compressed bitstream is copied
-    // into jpeg_output; the full image is never read back to the CPU. All work
-    // is queued on one stream, so the CPU waits only once, before the copy out.
-    bool NvidiaJpegEncoder::encode_device_rgb(std::vector<uint8_t>& jpeg_output) {
+    // into jpeg_ (system RAM); the full image is never read back to the CPU.
+    // jpeg_ keeps its capacity, so steady-state frames do not reallocate.
+    std::span<const uint8_t> NvidiaJpegEncoder::encode_device_rgb() {
         nvjpegImage_t image{};
         image.channel[0] = device_rgb_;
         image.pitch[0] = static_cast<size_t>(desc_.width) * 3;
@@ -207,31 +198,31 @@ namespace vkit {
         if (!check(nvjpegEncodeImage(handle_, encode_state_, encode_params_, &image,
                                      NVJPEG_INPUT_RGBI, desc_.width, desc_.height, stream_),
                    "nvjpegEncodeImage")) {
-            return false;
+            return {};
         }
 
         size_t output_size = 0;
         if (!check(nvjpegEncodeRetrieveBitstream(
                        handle_, encode_state_, nullptr, &output_size, stream_),
                    "nvjpegEncodeRetrieveBitstream(size)")) {
-            return false;
+            return {};
         }
 
         // The single CPU wait: conversion and encoding must be done before the
         // bitstream is copied out.
         if (!check(cudaStreamSynchronize(stream_), "cudaStreamSynchronize")) {
-            return false;
+            return {};
         }
 
-        jpeg_output.resize(output_size);
+        jpeg_.resize(output_size);
+        // Synchronize again so the bytes are fully in RAM before the caller sends them.
         if (!check(nvjpegEncodeRetrieveBitstream(
-                       handle_, encode_state_, jpeg_output.data(), &output_size, stream_),
-                   "nvjpegEncodeRetrieveBitstream(data)")) {
-            jpeg_output.clear();
-            return false;
+                       handle_, encode_state_, jpeg_.data(), &output_size, stream_),
+                   "nvjpegEncodeRetrieveBitstream(data)") ||
+            !check(cudaStreamSynchronize(stream_), "cudaStreamSynchronize")) {
+            return {};
         }
-        jpeg_output.resize(output_size);
-        return true;
+        return {jpeg_.data(), output_size};
     }
 
     void NvidiaJpegEncoder::cleanup() {
@@ -251,6 +242,7 @@ namespace vkit {
         handle_ = nullptr;
         registered_texture_.Reset();
         host_rgb_.clear();
+        jpeg_.clear();
         desc_ = {};
         initialized_ = false;
         texture_mode_ = false;

@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <vector>
 
 #include <cuda_runtime_api.h>
@@ -30,10 +31,11 @@ namespace vkit {
         // address from being mistaken for the old one.
         Microsoft::WRL::ComPtr<ID3D11Texture2D> registered_texture_;
         std::vector<uint8_t> host_rgb_;                 // CPU staging buffer, reused per frame
+        std::vector<uint8_t> jpeg_;                     // JPEG bytes in RAM (the returned view)
         bool initialized_ = false;
         bool texture_mode_ = false;
 
-        bool encode_device_rgb(std::vector<uint8_t>& jpeg_output);
+        std::span<const uint8_t> encode_device_rgb();
 
     public:
         NvidiaJpegEncoder() = default;
@@ -49,17 +51,17 @@ namespace vkit {
         // texture passed to encode_texture().
         bool init(ID3D11Device* d3d_device, const JpegEncoderDesc& desc);
 
-        bool encode_bgra(const uint8_t* pixels,
-                         size_t row_pitch,
-                         std::vector<uint8_t>& jpeg_output);
+        // Both encode functions return a view of the JPEG in system RAM, valid
+        // until the next encode/init/cleanup call. Empty on failure.
+        std::span<const uint8_t> encode_bgra(const uint8_t* pixels, size_t row_pitch);
 
         // Requires the D3D11 init() overload.
-        bool encode_texture(ID3D11Texture2D* texture,
-                            std::vector<uint8_t>& jpeg_output);
+        std::span<const uint8_t> encode_texture(ID3D11Texture2D* texture);
 
         void cleanup();
 
         JpegEncoderDesc get_desc() const { return desc_; }
+        bool uses_video_memory() const { return texture_mode_; }
     };
 
 } // namespace vkit

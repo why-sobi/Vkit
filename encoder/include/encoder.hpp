@@ -15,14 +15,16 @@ namespace vkit {
     //
     //   bool init(const JpegEncoderDesc& desc);                       // CPU input
     //   bool init(ID3D11Device* d3d_device, const JpegEncoderDesc&);  // GPU input
-    //   bool encode_bgra(const uint8_t* pixels, size_t row_pitch,
-    //                    std::vector<uint8_t>& jpeg_output);
-    //   bool encode_texture(ID3D11Texture2D* texture,
-    //                       std::vector<uint8_t>& jpeg_output);
+    //   std::span<const uint8_t> encode_bgra(const uint8_t* pixels, size_t row_pitch);
+    //   std::span<const uint8_t> encode_texture(ID3D11Texture2D* texture);
     //   void cleanup();
+    //   JpegEncoderDesc get_desc() const;
+    //   bool uses_video_memory() const;   // true when frames stay on the GPU
     //
-    // The compressed JPEG bytes are returned in CPU memory so they can be sent
-    // over a normal socket to the ESP32.
+    // The encode functions return a view of the finished JPEG in system RAM,
+    // ready to hand to send() for the ESP32 stream. The view points into the
+    // encoder's own output buffer (no extra copy), so it is only valid until the
+    // next encode, init() or cleanup() call. An empty span means failure.
 
     // Forward declare the concrete implementation class so the alias knows it exists
     #if defined(VKIT_USE_INTEL_VPL)

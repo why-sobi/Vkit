@@ -61,9 +61,6 @@ else()
     message(FATAL_ERROR "Unknown VKIT_ENCODER_BACKEND '${VKIT_ENCODER_BACKEND}'. Use INTEL or NVIDIA.")
 endif()
 
-# Optional test executable
-# add_executable(encoder_test tests/jpeg_encoder_test.cpp)
-# target_link_libraries(encoder_test PRIVATE encoder)
-# if (WIN32)
-#     target_link_libraries(encoder_test PRIVATE shell32)
-# endif()
+# Small encoder smoke test (runs without the canvas)
+add_executable(jpeg_encoder_test tests/jpeg_encoder_test.cpp)
+target_link_libraries(jpeg_encoder_test PRIVATE encoder)

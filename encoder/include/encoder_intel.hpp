@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <list>
 #include <memory>
+#include <span>
 #include <vector>
 
 #include <d3d11.h>
@@ -46,7 +47,7 @@ namespace vkit {
         mfxFrameSurface1 surface_{};          // BGRA (MFX_FOURCC_RGB4) input frame
         mfxBitstream bitstream_{};            // compressed JPEG output
         std::vector<uint8_t> surface_data_;   // system-memory backing for surface_
-        std::vector<uint8_t> bitstream_data_; // backing memory for bitstream_
+        std::vector<uint8_t> bitstream_data_; // backing memory for bitstream_ (the returned JPEG view)
         bool initialized_ = false;
         bool video_memory_ = false;           // true: surface_ is a D3D11 texture
 
@@ -64,7 +65,7 @@ namespace vkit {
         void close_session();
         bool create_input_texture();
         bool create_staging_texture(const D3D11_TEXTURE2D_DESC& src_desc);
-        bool encode_surface(std::vector<uint8_t>& jpeg_output);
+        std::span<const uint8_t> encode_surface();
 
         mfxStatus alloc_frames(const mfxFrameAllocRequest& request, mfxFrameAllocResponse& response);
         mfxStatus free_frames(mfxFrameAllocResponse& response);
@@ -91,13 +92,12 @@ namespace vkit {
         // texture passed to encode_texture(), and must be on the Intel adapter.
         bool init(ID3D11Device* d3d_device, const JpegEncoderDesc& desc);
 
-        bool encode_bgra(const uint8_t* pixels,
-                         size_t row_pitch,
-                         std::vector<uint8_t>& jpeg_output);
+        // Both encode functions return a view of the JPEG in system RAM, valid
+        // until the next encode/init/cleanup call. Empty on failure.
+        std::span<const uint8_t> encode_bgra(const uint8_t* pixels, size_t row_pitch);
 
         // Requires the D3D11 init() overload. The texture must be B8G8R8A8.
-        bool encode_texture(ID3D11Texture2D* texture,
-                            std::vector<uint8_t>& jpeg_output);
+        std::span<const uint8_t> encode_texture(ID3D11Texture2D* texture);
 
         void cleanup();
 

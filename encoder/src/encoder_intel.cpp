@@ -262,19 +262,14 @@ namespace vkit {
         return true;
     }
 
-    bool IntelJpegEncoder::encode_bgra(
-        const uint8_t* pixels,
-        size_t row_pitch,
-        std::vector<uint8_t>& jpeg_output) {
-        jpeg_output.clear();
-
+    std::span<const uint8_t> IntelJpegEncoder::encode_bgra(const uint8_t* pixels, size_t row_pitch) {
         if (!initialized_) {
             std::cerr << "[IntelJpegEncoder] Encoder is not initialized.\n";
-            return false;
+            return {};
         }
         if (!pixels || row_pitch < static_cast<size_t>(desc_.width) * 4) {
             std::cerr << "[IntelJpegEncoder] Invalid BGRA input.\n";
-            return false;
+            return {};
         }
 
         if (video_memory_) {
@@ -283,7 +278,7 @@ namespace vkit {
             d3d_context_->UpdateSubresource(input_frame_.texture.Get(), 0, &box,
                                             pixels, static_cast<UINT>(row_pitch), 0);
             surface_.Data.MemId = &input_frame_;
-            return encode_surface(jpeg_output);
+            return encode_surface();
         }
 
         // Input is already BGRA, which matches RGB4, so this is a row copy only.
@@ -295,17 +290,13 @@ namespace vkit {
                         row_bytes);
         }
 
-        return encode_surface(jpeg_output);
+        return encode_surface();
     }
 
-    bool IntelJpegEncoder::encode_texture(
-        ID3D11Texture2D* texture,
-        std::vector<uint8_t>& jpeg_output) {
-        jpeg_output.clear();
-
+    std::span<const uint8_t> IntelJpegEncoder::encode_texture(ID3D11Texture2D* texture) {
         if (!initialized_ || !d3d_context_ || !texture) {
             std::cerr << "[IntelJpegEncoder] Texture encoding is not initialized.\n";
-            return false;
+            return {};
         }
 
         D3D11_TEXTURE2D_DESC src_desc{};
@@ -314,7 +305,7 @@ namespace vkit {
             (src_desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM &&
              src_desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM_SRGB)) {
             std::cerr << "[IntelJpegEncoder] Texture must be B8G8R8A8 and at least the encoder size.\n";
-            return false;
+            return {};
         }
 
         if (video_memory_) {
@@ -340,16 +331,16 @@ namespace vkit {
                 surface_.Data.MemId = &input_frame_;
             }
 
-            const bool success = encode_surface(jpeg_output);
+            const auto jpeg = encode_surface();
             // Do not keep the caller's texture alive past this call.
             external_frame_.texture.Reset();
-            return success;
+            return jpeg;
         }
 
         // System-memory fallback: read the texture back through a staging copy.
         // The staging texture is created once, and recreated if the caller
         // switches to a texture with a different description.
-        if (!create_staging_texture(src_desc)) return false;
+        if (!create_staging_texture(src_desc)) return {};
 
         d3d_context_->CopyResource(staging_texture_.Get(), texture);
 
@@ -357,14 +348,14 @@ namespace vkit {
         HRESULT hr = d3d_context_->Map(staging_texture_.Get(), 0, D3D11_MAP_READ, 0, &mapped);
         if (FAILED(hr)) {
             std::cerr << "[IntelJpegEncoder] Failed to map staging texture.\n";
-            return false;
+            return {};
         }
 
-        const bool success = encode_bgra(
-            static_cast<const uint8_t*>(mapped.pData), mapped.RowPitch, jpeg_output);
+        // The JPEG lands in bitstream_data_, so the view outlives the Unmap.
+        const auto jpeg = encode_bgra(static_cast<const uint8_t*>(mapped.pData), mapped.RowPitch);
 
         d3d_context_->Unmap(staging_texture_.Get(), 0);
-        return success;
+        return jpeg;
     }
 
     bool IntelJpegEncoder::create_staging_texture(const D3D11_TEXTURE2D_DESC& src_desc) {
@@ -396,8 +387,9 @@ namespace vkit {
         return true;
     }
 
-    // Encodes the frame currently in surface_ and copies the JPEG out.
-    bool IntelJpegEncoder::encode_surface(std::vector<uint8_t>& jpeg_output) {
+    // Encodes the frame currently in surface_. The runtime writes the JPEG
+    // straight into bitstream_data_ (system RAM); the returned view points there.
+    std::span<const uint8_t> IntelJpegEncoder::encode_surface() {
         bitstream_.DataOffset = 0;
         bitstream_.DataLength = 0;
 
@@ -410,22 +402,20 @@ namespace vkit {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
 
-        if (!check(status, "MFXVideoENCODE_EncodeFrameAsync")) return false;
+        if (!check(status, "MFXVideoENCODE_EncodeFrameAsync")) return {};
         if (!sync_point) {
             std::cerr << "[IntelJpegEncoder] Encoder produced no output.\n";
-            return false;
+            return {};
         }
 
         // Waiting here also means the runtime is done reading the input texture
         // before control returns to the caller.
         if (!check(MFXVideoCORE_SyncOperation(session_, sync_point, 1000),
                    "MFXVideoCORE_SyncOperation")) {
-            return false;
+            return {};
         }
 
-        const uint8_t* data = bitstream_.Data + bitstream_.DataOffset;
-        jpeg_output.assign(data, data + bitstream_.DataLength);
-        return !jpeg_output.empty();
+        return {bitstream_.Data + bitstream_.DataOffset, bitstream_.DataLength};
     }
 
     // ------------------------------------------------------------------------
