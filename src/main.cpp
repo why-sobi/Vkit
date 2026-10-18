@@ -1,5 +1,7 @@
 // vkit/main.cpp
 
+#define VKIT
+
 #include "canvas.hpp"
 #include "encoder.hpp"
 #include "scaler.hpp"

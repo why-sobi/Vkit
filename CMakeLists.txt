@@ -1,8 +1,6 @@
-cmake_minimum_required(VERSION 3.20)
-
+cmake_minimum_required(VERSION 3.14)
 project(VKIT VERSION 1.0.0 LANGUAGES CXX)
 
-# Global C++ standard settings
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -12,11 +10,28 @@ add_compile_definitions(
     CANVAS_MOUSE_DISPLAY
 )
 
-# Add submodules (e.g. canvas, audio, input, etc.)
+# --- SMART HARDWARE AUTO-DETECTION ---
+# Try to find CUDA quietly on the host machine
+find_package(CUDAToolkit QUIET)
+
+if (CUDAToolkit_FOUND)
+    set(_DEFAULT_BACKEND "NVIDIA")
+    message(STATUS "[VKIT] Auto-detected NVIDIA CUDA Toolkit on host. Defaulting backend to NVIDIA.")
+else()
+    set(_DEFAULT_BACKEND "INTEL")
+    message(STATUS "[VKIT] No CUDA Toolkit found on host. Defaulting backend to Intel oneVPL.")
+endif()
+
+# Expose the option, defaulting to whatever was auto-detected
+set(VKIT_ENCODER_BACKEND "${_DEFAULT_BACKEND}" CACHE STRING "Choose encoder backend: INTEL or NVIDIA")
+set_property(CACHE VKIT_ENCODER_BACKEND PROPERTY STRINGS "INTEL" "NVIDIA")
+
+message(STATUS ">>> ACTIVE ENCODER BACKEND: ${VKIT_ENCODER_BACKEND}")
+# -------------------------------------
+
 add_subdirectory(canvas)
 add_subdirectory(scaler)
 add_subdirectory(encoder)
-
 
 # Top-level executable combining all modules
 add_executable(VKIT

@@ -23,7 +23,7 @@ extern "C" __global__ void vkit_bgra_to_rgb_kernel(
 }
 
 // Bridges the CUDA array returned by D3D11 interop to the conversion kernel.
-// This function is called from encoder.cpp, while the kernel above is compiled
+// This function is called from encoder_nvidia.cpp, while the kernel above is compiled
 // by nvcc from this .cu file.
 extern "C" bool vkit_convert_bgra_array_to_rgb(
     cudaArray_t source,
