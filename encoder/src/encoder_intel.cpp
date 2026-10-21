@@ -629,6 +629,24 @@ namespace vkit {
         return static_cast<IntelJpegEncoder*>(pthis)->free_frames(*response);
     }
 
+    bool IntelJpegEncoder::set_quality(int quality) {
+        if (!initialized_ || quality < 1 || quality > 100) return false;
+        if (quality == desc_.quality) return true;
+
+        // Reset keeps the session, allocator and surfaces; only the quantisation changes
+        mfxVideoParam params{};
+        if (!check(MFXVideoENCODE_GetVideoParam(session_, &params), "MFXVideoENCODE_GetVideoParam")) {
+            return false;
+        }
+        params.mfx.Quality = static_cast<mfxU16>(quality);
+        if (!check(MFXVideoENCODE_Reset(session_, &params), "MFXVideoENCODE_Reset")) {
+            return false;
+        }
+
+        desc_.quality = quality;
+        return true;
+    }
+
     void IntelJpegEncoder::cleanup() {
         close_session();
         staging_texture_.Reset();

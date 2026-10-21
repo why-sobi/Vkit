@@ -25,6 +25,7 @@ namespace vkit {
     //   bool init(ID3D11Device* d3d_device, const JpegEncoderDesc&);  // GPU input
     //   std::span<const uint8_t> encode_bgra(const uint8_t* pixels, size_t row_pitch);  // BGRA32 input only
     //   std::span<const uint8_t> encode_texture(ID3D11Texture2D* texture);               // texture format must match input_format
+    //   bool set_quality(int quality);    // 1-100, applies from the next encode without a re-init
     //   void cleanup();
     //   JpegEncoderDesc get_desc() const;
     //   bool uses_video_memory() const;   // true when frames stay on the GPU

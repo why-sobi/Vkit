@@ -229,6 +229,19 @@ namespace vkit {
         return {jpeg_.data(), output_size};
     }
 
+    bool NvidiaJpegEncoder::set_quality(int quality) {
+        if (!encode_params_ || quality < 1 || quality > 100) return false;
+        if (quality == desc_.quality) return true;
+
+        if (!check(nvjpegEncoderParamsSetQuality(encode_params_, quality, stream_),
+                   "nvjpegEncoderParamsSetQuality")) {
+            return false;
+        }
+
+        desc_.quality = quality;
+        return true;
+    }
+
     void NvidiaJpegEncoder::cleanup() {
         // Unregister before releasing the encoder's other CUDA resources.
         if (graphics_resource_) cudaGraphicsUnregisterResource(graphics_resource_);

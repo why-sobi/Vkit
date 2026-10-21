@@ -102,6 +102,10 @@ namespace vkit {
         // NV12 when the encoder was initialised with JpegInputFormat::NV12.
         std::span<const uint8_t> encode_texture(ID3D11Texture2D* texture);
 
+        // Changes the JPEG quality (1-100) for subsequent encodes, keeping the
+        // session, surfaces and output buffer. Cheap enough to call per frame.
+        bool set_quality(int quality);
+
         void cleanup();
 
         JpegEncoderDesc get_desc() const { return desc_; }
